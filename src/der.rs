@@ -57,7 +57,6 @@ impl<T> Oid for &T where T: Oid {}
 
 /// DER serialization APIs.
 pub mod write {
-    use chrono::{DateTime, Utc};
     use cookie_factory::{
         bytes::be_u8,
         combinator::{cond, slice, string},
@@ -66,9 +65,12 @@ pub mod write {
         sequence::{pair, tuple, Tuple},
         SerializeFn, WriteContext,
     };
-    use std::io::Write;
+    use crate::std::io::Write;
 
     use super::{DerType, Oid};
+
+    // len("20210213223000Z") == 15
+    type HString15 = heapless::String<heapless::consts::U15>;
 
     /// Encodes an ASN.1 type.
     fn der_type<W: Write>(typ: DerType) -> impl SerializeFn<W> {
@@ -102,12 +104,13 @@ pub mod write {
     }
 
     /// Encodes an ASN.1 data value using DER.
-    fn der_tlv<W: Write, Gen>(typ: DerType, ser_content: Gen) -> impl SerializeFn<W>
+    fn der_tlv<W: Write, N, Gen>(typ: DerType, ser_content: Gen) -> impl SerializeFn<W>
     where
-        Gen: SerializeFn<Vec<u8>>,
+        N: heapless::ArrayLength<u8>,
+        Gen: SerializeFn<heapless::Vec<u8, N>>,
     {
         // We serialize the content into a temporary buffer to determine its length.
-        let content = gen_simple(ser_content, vec![]).expect("can serialize into Vec");
+        let content = gen_simple(ser_content, heapless::Vec::<u8, N>::new()).expect("can serialize into Vec");
 
         tuple((der_type(typ), der_length(content.len()), slice(content)))
     }
@@ -125,9 +128,9 @@ pub mod write {
     /// Wraps an ASN.1 data value in an EXPLICIT marker.
     ///
     /// TODO: Find a specification reference for this.
-    pub fn der_explicit<W: Write, Gen>(typ: u8, inner: Gen) -> impl SerializeFn<W>
+    pub fn der_explicit<W: Write, Gen, N: heapless::ArrayLength<u8>>(typ: u8, inner: Gen) -> impl SerializeFn<W>
     where
-        Gen: SerializeFn<Vec<u8>>,
+        Gen: SerializeFn<heapless::Vec<u8, N>>,
     {
         der_tlv(DerType::Explicit(typ), inner)
     }
@@ -139,18 +142,18 @@ pub mod write {
     /// If the encoding represents the boolean value TRUE, its single contents octet shall
     /// have all eight bits set to one.
     /// ```
-    pub fn der_boolean<W: Write>(val: bool) -> impl SerializeFn<W> {
-        der_tlv(DerType::Boolean, slice(if val { &[0xff] } else { &[0x00] }))
+    pub fn der_boolean<W: Write, N: heapless::ArrayLength<u8>>(val: bool) -> impl SerializeFn<W> {
+        der_tlv::<_, N, _>(DerType::Boolean, slice(if val { &[0xff] } else { &[0x00] }))
     }
 
     /// Encodes a big-endian-encoded integer as an ASN.1 integer using DER.
-    pub fn der_integer<'a, W: Write + 'a>(mut num: &'a [u8]) -> impl SerializeFn<W> + 'a {
+    pub fn der_integer<'a, W: Write + 'a, N: heapless::ArrayLength<u8> + 'a>(mut num: &'a [u8]) -> impl SerializeFn<W> + 'a {
         // DER: Leading zeroes must be trimmed.
         while !num.is_empty() && num[0] == 0 {
             num = &num[1..];
         }
 
-        der_tlv(
+        der_tlv::<_, N, _>(
             DerType::Integer,
             pair(
                 // DER: Leading bit of an unsigned integer must have value 0.
@@ -161,8 +164,8 @@ pub mod write {
     }
 
     /// Encodes a usize as an ASN.1 integer using DER.
-    pub fn der_integer_usize<W: Write>(num: usize) -> impl SerializeFn<W> {
-        move |w: WriteContext<W>| der_integer(&num.to_be_bytes())(w)
+    pub fn der_integer_usize<W: Write, N: heapless::ArrayLength<u8>>(num: usize) -> impl SerializeFn<W> {
+        move |w: WriteContext<W>| der_integer::<_, N>(&num.to_be_bytes())(w)
     }
 
     /// Encodes an ASN.1 bit string using DER.
@@ -174,8 +177,8 @@ pub mod write {
     /// - The initial octet shall encode, as an unsigned binary integer with bit 1 as the
     ///   least significant bit, the number of unused bits in the final subsequent octet.
     /// ```
-    pub fn der_bit_string<'a, W: Write + 'a>(bytes: &'a [u8]) -> impl SerializeFn<W> + 'a {
-        der_tlv(DerType::BitString, pair(be_u8(0), slice(bytes)))
+    pub fn der_bit_string<'a, W: Write + 'a, N: heapless::ArrayLength<u8> + 'a>(bytes: &'a [u8]) -> impl SerializeFn<W> + 'a {
+        der_tlv::<_, N, _>(DerType::BitString, pair(be_u8(0), slice(bytes)))
     }
 
     /// Encodes an ASN.1 octet string using DER.
@@ -187,8 +190,8 @@ pub mod write {
     /// with the most significant bit of an octet of the data value aligned with the most
     /// significant bit of an octet of the contents octets.
     /// ```
-    pub fn der_octet_string<'a, W: Write + 'a>(bytes: &'a [u8]) -> impl SerializeFn<W> + 'a {
-        der_tlv(DerType::OctetString, slice(bytes))
+    pub fn der_octet_string<'a, W: Write + 'a, N: heapless::ArrayLength<u8> + 'a>(bytes: &'a [u8]) -> impl SerializeFn<W> + 'a {
+        der_tlv::<_, N, _>(DerType::OctetString, slice(bytes))
     }
 
     /// Encodes an ASN.1 NULL using DER.
@@ -197,8 +200,8 @@ pub mod write {
     /// ```text
     /// The contents octets shall not contain any octets. Note – The length octet is zero.
     /// ```
-    pub fn der_null<'a, W: Write + 'a>() -> impl SerializeFn<W> + 'a {
-        der_tlv(DerType::Null, Ok)
+    pub fn der_null<'a, W: Write + 'a, N: heapless::ArrayLength<u8> + 'a>() -> impl SerializeFn<W> + 'a {
+        der_tlv::<_, N, _>(DerType::Null, Ok)
     }
 
     /// Encodes an ASN.1 Object Identifier using DER.
@@ -206,7 +209,7 @@ pub mod write {
     /// # Panics
     ///
     /// Panics if `oid.as_ref().len() < 2`.
-    pub fn der_oid<W: Write, OID: Oid>(oid: OID) -> impl SerializeFn<W> {
+    pub fn der_oid<W: Write, OID: Oid, N: heapless::ArrayLength<u8>>(oid: OID) -> impl SerializeFn<W> {
         /// From X.690 section 8.19.2:
         /// ```text
         /// Each subidentifier is represented as a series of (one or more) octets. Bit 8
@@ -246,7 +249,7 @@ pub mod write {
             let oid_slice = oid.as_ref();
             assert!(oid_slice.len() >= 2);
 
-            der_tlv(
+            der_tlv::<_, N, _>(
                 DerType::Oid,
                 pair(
                     // The numerical value of the first subidentifier is derived from the
@@ -259,38 +262,48 @@ pub mod write {
     }
 
     /// Encodes an ASN.1 UTF8String using DER.
-    pub fn der_utf8_string<'a, W: Write + 'a>(s: &'a str) -> impl SerializeFn<W> + 'a {
-        der_tlv(DerType::Utf8String, string(s))
+    pub fn der_utf8_string<'a, W: Write + 'a, N: heapless::ArrayLength<u8> + 'a>(s: &'a str) -> impl SerializeFn<W> + 'a {
+        der_tlv::<_, N, _>(DerType::Utf8String, string(s))
     }
 
     /// Encodes the output of a sequence of serializers as an ASN.1 sequence using DER.
-    pub fn der_sequence<W: Write, List: Tuple<Vec<u8>>>(l: List) -> impl SerializeFn<W> {
-        der_tlv(DerType::Sequence, move |w: WriteContext<Vec<u8>>| {
+    pub fn der_sequence<W, List, N>(l: List) -> impl SerializeFn<W>
+    where
+        W: Write,
+        List: Tuple<heapless::Vec<u8, N>>,
+        N: heapless::ArrayLength<u8>,
+    {
+        der_tlv::<_, N, _>(DerType::Sequence, move |w: WriteContext<heapless::Vec<u8, N>>| {
             l.serialize(w)
         })
     }
 
     /// Encodes the output of a sequence of serializers as an ASN.1 set using DER.
-    pub fn der_set<W: Write, List: Tuple<Vec<u8>>>(l: List) -> impl SerializeFn<W> {
+    pub fn der_set<W, List, N>(l: List) -> impl SerializeFn<W>
+    where
+        W: Write,
+        List: Tuple<heapless::Vec<u8, N>>,
+        N: heapless::ArrayLength<u8>,
+    {
         // DER: The encodings of the component values of a set value shall appear in an
         // order determined by their tags.
         // TODO: Try to enforce this here.
-        der_tlv(DerType::Set, move |w: WriteContext<Vec<u8>>| l.serialize(w))
+        der_tlv::<_, N, _>(DerType::Set, move |w: WriteContext<heapless::Vec<u8, N>>| l.serialize(w))
     }
 
     /// Encodes an ASN.1 UTCTime using DER.
-    pub fn der_utc_time<W: Write>(t: DateTime<Utc>) -> impl SerializeFn<W> {
-        der_tlv(
+    pub fn der_utc_time<W: Write, N: heapless::ArrayLength<u8>>(t: &str) -> impl SerializeFn<W> {
+        der_tlv::<_, N, _>(
             DerType::UtcTime,
-            string(t.format("%y%m%d%H%M%SZ").to_string()),
+            string(HString15::from(t)),
         )
     }
 
     /// Encodes an ASN.1 GeneralizedTime using DER.
-    pub fn der_generalized_time<W: Write>(t: DateTime<Utc>) -> impl SerializeFn<W> {
-        der_tlv(
+    pub fn der_generalized_time<W: Write, N: heapless::ArrayLength<u8>>(t: &str) -> impl SerializeFn<W> {
+        der_tlv::<_, N, _>(
             DerType::GeneralizedTime,
-            string(t.format("%Y%m%d%H%M%SZ").to_string()),
+            string(HString15::from(t)),
         )
     }
 
@@ -300,34 +313,37 @@ pub mod write {
 
         use super::*;
 
+        pub type N = heapless::consts::U4096;
+        pub type HVecN = heapless::Vec<u8, N>;
+
         #[test]
         fn der_types() {
             // INTEGER
             assert_eq!(
-                gen_simple(der_type(DerType::Integer), vec![]).unwrap(),
+                gen_simple(der_type(DerType::Integer), HVecN::new()).unwrap(),
                 &[0x02]
             );
             // SEQUENCE
             assert_eq!(
-                gen_simple(der_type(DerType::Sequence), vec![]).unwrap(),
+                gen_simple(der_type(DerType::Sequence), HVecN::new()).unwrap(),
                 &[0x30]
             );
         }
 
         #[test]
         fn der_lengths() {
-            assert_eq!(gen_simple(der_length(1), vec![]).unwrap(), &[1]);
-            assert_eq!(gen_simple(der_length(127), vec![]).unwrap(), &[127]);
+            assert_eq!(gen_simple(der_length(1), HVecN::new()).unwrap(), &[1]);
+            assert_eq!(gen_simple(der_length(127), HVecN::new()).unwrap(), &[127]);
             assert_eq!(
-                gen_simple(der_length(128), vec![]).unwrap(),
+                gen_simple(der_length(128), HVecN::new()).unwrap(),
                 &[0x80 | 1, 128]
             );
             assert_eq!(
-                gen_simple(der_length(255), vec![]).unwrap(),
+                gen_simple(der_length(255), HVecN::new()).unwrap(),
                 &[0x80 | 1, 255]
             );
             assert_eq!(
-                gen_simple(der_length(256), vec![]).unwrap(),
+                gen_simple(der_length(256), HVecN::new()).unwrap(),
                 &[0x80 | 2, 1, 0]
             );
         }
@@ -335,7 +351,7 @@ pub mod write {
         #[test]
         fn der_tlvs() {
             assert_eq!(
-                gen_simple(der_tlv(DerType::Integer, slice(&[0x07; 4])), vec![]).unwrap(),
+                gen_simple(der_tlv::<_, N, _>(DerType::Integer, slice(&[0x07; 4])), HVecN::new()).unwrap(),
                 &[0x02, 0x04, 0x07, 0x07, 0x07, 0x07]
             );
         }
@@ -343,40 +359,40 @@ pub mod write {
         #[test]
         fn der_usize_integers() {
             assert_eq!(
-                gen_simple(der_integer_usize(0), vec![]).unwrap(),
-                vec![2, 1, 0]
+                gen_simple(der_integer_usize::<_, N>(0), HVecN::new()).unwrap(),
+                &[2, 1, 0]
             );
             assert_eq!(
-                gen_simple(der_integer_usize(127), vec![]).unwrap(),
-                vec![2, 1, 127]
+                gen_simple(der_integer_usize::<_, N>(127), HVecN::new()).unwrap(),
+                &[2, 1, 127]
             );
             assert_eq!(
-                gen_simple(der_integer_usize(128), vec![]).unwrap(),
-                vec![2, 2, 0, 128]
+                gen_simple(der_integer_usize::<_, N>(128), HVecN::new()).unwrap(),
+                &[2, 2, 0, 128]
             );
             assert_eq!(
-                gen_simple(der_integer_usize(255), vec![]).unwrap(),
-                vec![2, 2, 0, 255]
+                gen_simple(der_integer_usize::<_, N>(255), HVecN::new()).unwrap(),
+                &[2, 2, 0, 255]
             );
             assert_eq!(
-                gen_simple(der_integer_usize(256), vec![]).unwrap(),
-                vec![2, 2, 1, 0]
+                gen_simple(der_integer_usize::<_, N>(256), HVecN::new()).unwrap(),
+                &[2, 2, 1, 0]
             );
             assert_eq!(
-                gen_simple(der_integer_usize(32767), vec![]).unwrap(),
-                vec![2, 2, 127, 255]
+                gen_simple(der_integer_usize::<_, N>(32767), HVecN::new()).unwrap(),
+                &[2, 2, 127, 255]
             );
             assert_eq!(
-                gen_simple(der_integer_usize(32768), vec![]).unwrap(),
-                vec![2, 3, 0, 128, 0]
+                gen_simple(der_integer_usize::<_, N>(32768), HVecN::new()).unwrap(),
+                &[2, 3, 0, 128, 0]
             );
             assert_eq!(
-                gen_simple(der_integer_usize(65535), vec![]).unwrap(),
-                vec![2, 3, 0, 255, 255]
+                gen_simple(der_integer_usize::<_, N>(65535), HVecN::new()).unwrap(),
+                &[2, 3, 0, 255, 255]
             );
             assert_eq!(
-                gen_simple(der_integer_usize(65536), vec![]).unwrap(),
-                vec![2, 3, 1, 0, 0]
+                gen_simple(der_integer_usize::<_, N>(65536), HVecN::new()).unwrap(),
+                &[2, 3, 1, 0, 0]
             );
         }
     }
